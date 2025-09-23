@@ -42,9 +42,7 @@ jupyter notebook SVI.ipynb
    $$
 4. **First guess of the total variance surface**
 
-   $$
-   w(k,\theta) = \frac{\theta}{2}\left[1+\rho \phi(\theta)k+\sqrt{(\phi(\theta)k+\rho)^2+(1-\rho^2)}\right]
-   $$
+   $   w(k,\theta) = \frac{\theta}{2}\left[1+\rho \phi(\theta)k+\sqrt{(\phi(\theta)k+\rho)^2+(1-\rho^2)}\right]$
 
    with
 
