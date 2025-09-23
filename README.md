@@ -46,9 +46,7 @@ jupyter notebook SVI.ipynb
 
    with
 
-   $$
-   \phi(\theta) = \frac{\eta}{\sqrt{\theta}}
-   $$
+   $\phi(\theta) = \frac{\eta}{\sqrt{\theta}}$
    
 6. **Slice-by-slice fitting** with penalties for arbitrage violations
 
@@ -72,9 +70,7 @@ Crossedness measure:
 2. Construct mid-knots \$K'\$ around those intersections
 3. Define
 
-   $$
-   C = \max\big[0, w(k'_j,t_{i-1}) - w(k'_j,t_i)\big]
-   $$
+   $C = \max\big[0, w(k'_j,t_{i-1}) - w(k'_j,t_i)\big]$
 
 ### Butterfly Arbitrage
 
