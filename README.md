@@ -51,7 +51,8 @@ jupyter notebook SVI.ipynb
    $$
    \phi(\theta) = \frac{\eta}{\sqrt{\theta}}
    $$
-5. **Slice-by-slice fitting** with penalties for arbitrage violations
+   
+6. **Slice-by-slice fitting** with penalties for arbitrage violations
 
 ---
 
