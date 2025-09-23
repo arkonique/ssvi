@@ -70,7 +70,7 @@ Crossedness measure:
 2. Construct mid-knots \$K'\$ around those intersections
 3. Define
 
-$C = \max\big[0, w(k'_j,t_{i-1}) - w(k'_j,t_i)\big]$
+$C=\max\big[0, w(k'_j,t_{i-1}) - w(k'_j,t_i)\big]$
 
 ### Butterfly Arbitrage
 
