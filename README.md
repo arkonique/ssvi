@@ -105,23 +105,99 @@ or equivalently in terms of \$w(k,t)\$, ensuring local convexity.
 
 ## 5. Example Usage
 
+### 1. Pull & prep everything
+```python
+import pandas as pd
+import SVI  # your module with the notebook functions
+
+from SVI import get_option_chain
+
+ticker = "AAPL"
+chains = get_option_chain(ticker)   # -> {'calls': df, 'puts': df} with mid, tj, k, w, F, bs_mid, type
+calls, puts = chains['calls'], chains['puts']
+
+# Combine for fitting
+all_options = pd.concat([calls, puts], ignore_index=True)
+```
+### 2. Fit the ATM variance curve θ(t) and publish it to globals
+```python
+from SVI import build_theta, theta_function
+
+# θ(t) = a + b t^c (isotonic baseline + parametric smoothing)
+a, b, c = build_theta(all_options)
+print("THETA_PARAMS:", (a, b, c))
+
+# If your fitter reads θ from the module global, make it available:
+SVI.THETA_PARAMS = (a, b, c)
+
+# Optional: a callable if you want to evaluate θ(t) directly
+theta = lambda t: theta_function(t, a, b, c)
+
+# Example: θ at 30 days
+print("θ(30d):", theta(30/365))
+```
+
+### 3. Get a global first guess for (ρ, η)
+```python
+from SVI import first_guess
+
+# Fits (rho, eta) across all data given THETA_PARAMS
+(rho_hat, eta_hat), res0 = first_guess(all_options)
+print("W_PARAMS (rho, eta):", (rho_hat, eta_hat))
+
+# If you cache these in the module too:
+SVI.W_PARAMS = (rho_hat, eta_hat)
+```
+
+### 4. Plot a single maturity slice: market vs SSVI
+```python
+import numpy as np
+from SVI import plot_slice
+
+tjs = np.sort(all_options['tj'].unique())
+tj = float(tjs[0])  # pick one maturity
+
+# Plots prices/IVs and total variance for the chosen expiry
+plot_slice(all_options, tj, rho_hat, eta_hat, a, b, c, type_o="call", save=False)
+```
+
+### 5. Build all slices and the 3D total variance surface
+```python
+from SVI import all_slices, plot_w_surface
+
+# Evaluate SSVI w(k,t) across all observed maturities/strikes (and optionally plot per-slice)
+Wkt = all_slices(all_options, rho_hat, eta_hat, a, b, c, type_o="call", plot=True, save=False)
+
+# Smooth to a grid with RBF and plot w(k,t)
+plot_w_surface(Wkt, save=False)
+```
+
+### 6. (OPTIONAL) Forward estimation for a single expiry
 ```python
 import yfinance as yf
+import numpy as np
 from SVI import prep, compute_forwards
 
 ticker = yf.Ticker("AAPL")
 expiry = ticker.options[0]
 
-calls = ticker.option_chain(expiry).calls
-puts  = ticker.option_chain(expiry).puts
+calls_raw = ticker.option_chain(expiry).calls
+puts_raw  = ticker.option_chain(expiry).puts
 
-calls_prep = prep(calls, expiry)
-puts_prep  = prep(puts, expiry)
+# Prepare (adds mid price + time-to-maturity 'tj')
+calls_prep = prep(calls_raw, expiry)
+puts_prep  = prep(puts_raw,  expiry)
 
-F = compute_forwards(calls_prep, puts_prep, "AAPL", r=0.05)
-print("Forward price:", F)
+# Robust forward per-expiry via put–call parity (across many strikes)
+# NOTE: compute_forwards returns (forwards_df, calls_df_with_F, puts_df_with_F)
+forwards_df, calls_F, puts_F = compute_forwards(calls_prep, puts_prep, "AAPL", r=0.05, use_weights=True)
+
+print(forwards_df.head())  # has ['expirationDate','tj','F']
+F0 = float(forwards_df['F'].iloc[0])
+
+# Log-moneyness example for that expiry
+k = np.log(calls_F.loc[calls_F['expirationDate']==expiry, 'strike'] / F0)
 ```
-
 ---
 
 ## 6. Outputs
