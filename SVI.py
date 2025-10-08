@@ -1345,14 +1345,8 @@ def get_plot_slice_arrays(ticker_symbol: str, tj_value: float, option_type: str 
 
 
 if __name__ == "__main__":
-    """
-    # Tests
-
-    ## 1. Set the ticker Symbol in the next **cell**
-    """
     ticker_symbol = 'AAPL'
 
-    """## 2. Get the Option Chain along with other required fields"""
 
     calls_and_puts = get_option_chain(ticker_symbol)
     calls = calls_and_puts['calls']
@@ -1360,84 +1354,17 @@ if __name__ == "__main__":
 
     all_options = pd.concat([calls, puts], ignore_index=True)
 
-    """## 3. Build a monotonic function for θ
-
-    $\theta(t) = a + b t^c$
-    """
 
     a, b, c = build_theta(all_options)
     THETA_PARAMS = (a, b, c)
     print(f"Fitted theta params: a={a:.6f}, b={b:.6f}, c={c:.6f}")
 
-    """## 4. Fit over the entire k,θ region for the first guess of w(k,θ)
-
-    $w(k,θ) = \frac{θ}{2}\left[1+\rho\phi(\theta)k+\sqrt{(\phi(\theta)k+\rho)^2+(1-\rho^2)}\right]$
-
-    $\phi(\theta) = \frac{\eta}{\sqrt{\theta}}$
-    """
 
     initial_guess = [-0.5, 1.0]
     (rho_hat, eta_hat), result = first_guess(all_options, x0=initial_guess, verbose=0)
     print(f"Fitted SSVI params (first guess): rho={rho_hat:.6f}, eta={eta_hat:.6f}")
     W_PARAMS = (rho_hat, eta_hat)
 
-    """## 5. Fit w slice by slice by adding penalties for calendar arbitrage and butterfly arbitrage
-
-    ### Calendar Arbitrage Condition
-    Calendar arbitrage happens when option prices across different maturities are inconsistent, so you could lock in a risk-free profit by buying and selling options with the same strike but different expiries.
-
-    This happens when the implied total variance surface violates the basic rule that variance should be non-decreasing with maturity, in other words, if a short-dated option looks “more expensive” in variance terms than a longer-dated option at the same strike, you can arbitrage the difference.
-
-    i.e. To avoid calendar arbitrage the following condition must be true:
-
-    $C(k,t_2)>C(k,t_1) \forall t_2>t_1$
-
-    or
-
-    $\frac{\partial C}{\partial t}\ge 0$
-
-    which is the same as saying:
-
-    $\frac{\partial w}{\partial t}\ge 0$
-
-    In this case this is avoided by minimizing the "crossedness" of any two slices of w.
-
-    Crossedness is defined as follows:
-
-    1. Find all the points where the slice $t_i$ and $t_{i-1}$ intersect. Let this be the set $\left\{k: k \textrm{ is a root of } w(k,t_{i-1})-w(k,t_i)=0\right\}$ and $|K|\le4$
-    1. Find the set of "mid-knots" $K'$ as follows (here I have set Δ to 1 as per Gatheral & Jaquier (2014)):
-        - $k'_1=k_1-\Delta$
-        - $k'_i=\frac{1}{2} (k_i+k_i$<sub>-1</sub>)
-        - $k'_n=k_n+\Delta$
-    1. Define the crossedness of slice i as:
-
-        $C = \max[\max[0,w(k'_j,t_{i-1})-w(k'_j,t_i)]]$
-        where $k'_j \in K'$
-
-    ### Butterfly Arbitrage Condition
-    Butterfly arbitrage is when option prices across strikes for the same maturity are inconsistent, so you could lock in a risk-free profit using a butterfly spread. A butterfly spread for a call option is 1 low strike long call, 1 high strike long call and 2 mid strike short calls.
-
-    This happens when the implied volatility smile is shaped in a way that makes the option price curve non-convex in strike, in other words, if the second derivative of call prices with respect to strike goes negative, it signals an arbitrage.
-
-    i.e. To avoid butterfly arbitrage, the following condition must be true:
-
-    $C(K_2,t)\ge \lambda C(K_1,t)-(1-\lambda)C(K_3,t)$ where $\lambda = \frac{K_3 - K_2}{K_3 - K_1}$
-
-    or
-
-    $\frac{\partial^2C}{\partial K^2}\ge 0$
-
-    which is the same as saying:
-
-    $q\ge 0$ where q is the risk-neutral probability density
-
-    In this case we use the specific butterfly arbitrage conditions for an SSVI from Gatheral & Jaquier (2014):
-
-    1. $\theta\phi(\theta)(1+|\rho|)<4$
-    1. $\theta\phi^2(\theta)(1+|\rho|)\le4$
-
-    This is implemented by minimizing $\max(\theta\phi(\theta)(1+|\rho|)-4,0)$ and $\max(\theta\phi^2(\theta)(1+|\rho|)-4,0)$
-    """
 
     t = sorted(all_options['tj'].unique())
 
@@ -1450,16 +1377,9 @@ if __name__ == "__main__":
     slices_df = pd.DataFrame(slice_results, columns=['tj','rho','eta'])
     print(slices_df)
 
-    """## Plotting Steps
-
-    ### 1. Individual Slices - Plot of prices and total variance vs k at each maturity
-
-    ### Set this to True to plot all individual slices ⬇
-    """
 
     plot_individual_slices_bool = False
 
-    """### Set this to True to save all individual slices as pngs ⬇"""
 
     save_individual_slices_bool = False
 
@@ -1469,27 +1389,17 @@ if __name__ == "__main__":
             print(f"Plotting slice for tj={tj:.4f}, rho={rho_j:.6f}, eta={eta_j:.6f}")
             plot_slice(all_options, tj, rho_j, eta_j, a, b, c, type_o='call', save=save_individual_slices_bool)
 
-    """### 2. All slices - Plot of all maturity total variance slices vs k
-
-    ### Set this to True to plot all slices ⬇
-    """
 
     plot_all_slices_bool = True
 
-    """### Set this to True to save the plot as a png ⬇"""
 
     save_all_slices_bool = False
 
     Wkt = all_slices(all_options, rho_hat, eta_hat, a, b, c, type_o='call', plot=plot_all_slices_bool, save=save_all_slices_bool)
 
-    """### 3. Full variance surface - plot of w vs k vs t
-
-    ### Set this to True to plot the variance surface ⬇
-    """
-
+    
     plot_surface_bool = True
 
-    """### Set this to True to save the surface plot as a png ⬇"""
 
     save_surface_bool = False
 
