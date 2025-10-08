@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Document</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cantata+One&family=Roboto:ital,wght@0,100..900;1,100..900&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <main>
+        <h1>SVI Calibration and Visualization</h1>
+        <p>This project focuses on calibrating the Stochastic Volatility Inspired (SVI) model to market option data and visualizing the results. The SVI model is widely used in financial markets to describe the implied volatility surface of options.</p>
+        <h2>Key Features</h2>
+        <ul>
+            <li>Data Acquisition: Fetches real-time option chain data for specified ticker symbols using the yfinance library.</li>
+            <li>Data Processing: Computes forward price, log-moneyness and total implied variance for each option, preparing the data for SVI calibration.</li>
+            <li>SVI Calibration: Implements a robust calibration routine to fit the SVI parameters (a, b, rho, m, sigma) to market data based on Gatheral's framework.</li>
+            <li>Visualization: Generates plots for individual slices of the volatility surface as well as a 3D surface plot of total implied variance across strikes and maturities.</li>
+        </ul>
+        <div class="inputs">
+            <input type="text" placeholder="Enter ticker symbol (e.g., AAPL, AMZN)" id="tickerInput" value="AMZN"/>
+            <button id="calibrateButton" type="submit">Calibrate SVI</button>
+        </div>
+        <div class="waiter">Enter a ticker and click "Calibrate SVI"</div>
+        <div class="outputs">
+            <div class="surface"></div>
+            <div class="slices"></div>
+            <div class="bottom">
+                <div class="prices"></div>
+                <div class="vols"></div>
+                <div class="tj">
+                    <div class="tj-row">
+                        <span id="tjMinLabel">MIN</span>
+                        <input type="range" min="0" max="100" value="0" class="slider" id="tjSlider" list="tjTicks">
+                        <span id="tjMaxLabel">MAX</span>
+                    </div>
+                    <div id="tjValContainer">t = <span id="tjValLabel">MATURITY</span> years</div>
+                    <datalist id="tjTicks"></datalist>
+                </div>
+            </div>
+        </div>
+    </main>
+    <script src="https://cdn.plot.ly/plotly-3.0.1.min.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>

@@ -19,6 +19,32 @@ from scipy.stats import norm
 from scipy.interpolate import interp1d, RBFInterpolator
 from scipy.optimize import curve_fit, least_squares, brentq
 from sklearn.isotonic import IsotonicRegression
+from time import time
+
+# ---------------------------------------------------------
+# Simple module-level cache for per-(ticker, option_type) results
+# ---------------------------------------------------------
+_CACHE = {}  # key: (ticker, type) -> dict payload below
+_CACHE_TTL_SECONDS = 15 * 60  # 15 minutes; tweak as you like
+
+def _cache_key(ticker: str, option_type: str):
+    return (ticker.upper(), option_type.lower())
+
+def _is_fresh(entry) -> bool:
+    if not entry: 
+        return False
+    ts = entry.get("timestamp", 0)
+    return (time() - ts) < _CACHE_TTL_SECONDS
+
+def _get_cached(ticker: str, option_type: str):
+    return _CACHE.get(_cache_key(ticker, option_type))
+
+def _set_cached(ticker: str, option_type: str, payload: dict):
+    payload = dict(payload)
+    payload["timestamp"] = time()
+    _CACHE[_cache_key(ticker, option_type)] = payload
+
+
 
 R = 0.05  # risk-free rate for discounting
 THETA_PARAMS = None  # to cache a,b,c after first fit
@@ -845,6 +871,478 @@ def sigma_atm(t, a, b, c):
     """
     theta_t = a + b * (t ** c)
     return np.sqrt(np.maximum(theta_t / t, 0.0))
+
+
+def tj_to_maturities(tj_array, ref_date=None):
+    """
+    Convert time-to-expiry in years (tj) back to actual maturity dates.
+
+    Args:
+        tj_array: list or np.ndarray of time-to-expiry in years
+        ref_date: reference date (datetime or str 'YYYY-MM-DD').
+                  Defaults to today's date if None.
+
+    Returns:
+        maturities: list of pandas.Timestamp objects
+    """
+    if ref_date is None:
+        ref_date = datetime.today()
+    elif isinstance(ref_date, str):
+        ref_date = pd.Timestamp(ref_date)
+
+    maturities = [ref_date + pd.Timedelta(days=float(tj) * 365.0) for tj in tj_array]
+    return maturities
+
+def get_theta_fit(ticker_symbol: str, type: str) -> dict:
+    """
+    Wrapper to compute θ(t) = a + b * t^c for a given ticker symbol.
+
+    Returns:
+        {
+            'a': float,
+            'b': float,
+            'c': float,
+            'tj': np.ndarray,        # maturities (years)
+            'theta': np.ndarray      # theta(tj) values
+        }
+    """
+    # 1) Load option data
+    chain = get_option_chain(ticker_symbol)
+    calls = chain['calls']
+    puts = chain['puts']
+    all_options = pd.concat([calls, puts], ignore_index=True)
+
+    if type == 'call':
+        all_options = all_options[all_options['type'] == 'call']
+    elif type == 'put':
+        all_options = all_options[all_options['type'] == 'put']
+    elif type != 'both':
+        raise ValueError("type must be 'call', 'put', or 'both'")
+
+    # 2) Fit theta(t) = a + b * t^c
+    a, b, c = build_theta(all_options)
+    tj = np.sort(all_options['tj'].unique())
+    theta_vals = a + b * (tj ** c)
+
+    # 3) Package neatly
+    result = {
+        "a": float(a),
+        "b": float(b),
+        "c": float(c),
+        "tj": tj.tolist(),
+        "maturities": tj_to_maturities(tj),
+        "theta": theta_vals.tolist()
+    }
+    return result
+
+def get_slices_df(ticker_symbol: str, verbose: int = 0) -> pd.DataFrame:
+    """
+    Convenience wrapper:
+      1) fetch complete option chain for `ticker_symbol`
+      2) fit θ(t) = a + b t^c and set global THETA_PARAMS
+      3) get a global first-guess (rho, eta)
+      4) fit (rho, eta) slice-by-slice to build `slices_df`
+
+    Returns:
+        slices_df : DataFrame with columns ['tj', 'rho', 'eta'], sorted by tj
+    """
+    # 1) Pull options and assemble the working frame
+    chain = get_option_chain(ticker_symbol)
+    calls = chain['calls']
+    puts  = chain['puts']
+    all_options = pd.concat([calls, puts], ignore_index=True)
+
+    # 2) Fit theta(t) and cache
+    a, b, c = build_theta(all_options)
+    global THETA_PARAMS, W_PARAMS
+    THETA_PARAMS = (a, b, c)
+
+    # 3) First-guess across all points to seed per-slice fits
+    (rho_hat, eta_hat), _ = first_guess(all_options, x0=[-0.5, 1.0], verbose=verbose)
+    W_PARAMS = (rho_hat, eta_hat)
+
+    # 4) Slice-by-slice fit
+    ts = sorted(all_options['tj'].unique())
+    rows = []
+    for tj in ts:
+        (rho_j, eta_j), _ = slice_fit(all_options, tj, x0=[rho_hat, eta_hat], verbose=verbose)
+        rows.append((float(tj), float(rho_j), float(eta_j)))
+
+    slices_df = pd.DataFrame(rows, columns=['tj', 'rho', 'eta']).sort_values('tj').reset_index(drop=True)
+    return slices_df, a, b, c
+
+
+def get_slice_xy_for_ticker(ticker_symbol: str,
+                            tj_value: float,
+                            type_o: str = 'call',
+                            verbose: int = 0):
+    """
+    Return arrays to plot one SSVI slice (market vs model) for a given ticker and tj.
+
+    Returns:
+        {
+          'ticker': str,
+          'requested_tj': float,     # what you asked for
+          'chosen_tj': float,        # nearest maturity actually used
+          'a': float, 'b': float, 'c': float,
+          'rho': float, 'eta': float,
+          'k_market': np.ndarray,
+          'w_market': np.ndarray,
+          'k_model': np.ndarray,
+          'w_model': np.ndarray
+        }
+    """
+    # ----- Guard & normalize inputs
+    if tj_value is None:
+        raise ValueError("tj_value is None. Pass a float time-to-maturity in years.")
+    try:
+        tj_req = float(tj_value)
+    except Exception:
+        raise ValueError(f"tj_value='{tj_value}' is not a float.")
+
+    # ----- 1) Pull option chain & combine
+    chain = get_option_chain(ticker_symbol)   # calls/puts dataframes
+    df = pd.concat([chain['calls'], chain['puts']], ignore_index=True)
+
+    # Ensure 'tj' is numeric and drop invalid rows
+    df = df.copy()
+    df['tj'] = pd.to_numeric(df['tj'], errors='coerce')
+    df = df.dropna(subset=['tj', 'k', 'w'])
+    if df.empty:
+        raise ValueError("No valid option rows after cleaning.")
+
+    # ----- 2) Fit θ(t) = a + b t^c and cache
+    a, b, c = build_theta(df)                 # fits params for theta(t)
+    global THETA_PARAMS
+    THETA_PARAMS = (a, b, c)
+
+    # ----- 3) First-guess (ρ, η) and then slice-refine at nearest maturity
+    (rho_hat, eta_hat), _ = first_guess(df, x0=[-0.5, 1.0], verbose=verbose)
+
+    # pick the closest available maturity to requested tj
+    tjs_available = np.sort(df['tj'].to_numpy(dtype=float))
+    if tjs_available.size == 0:
+        raise ValueError("No maturities found in option data.")
+    chosen_tj = float(tjs_available[np.argmin(np.abs(tjs_available - tj_req))])
+
+    (rho_j, eta_j), _ = slice_fit(df, chosen_tj, x0=[rho_hat, eta_hat], verbose=verbose)
+
+    # ----- 4) Extract market slice for requested option type
+    d_slice = df[(df['type'] == type_o) & (np.isclose(df['tj'], chosen_tj, atol=1e-12))].copy()
+    if d_slice.empty:
+        # fallback: ignore type filter if no rows (e.g., only calls/puts exist)
+        d_slice = df[np.isclose(df['tj'], chosen_tj, atol=1e-12)].copy()
+    if d_slice.empty:
+        raise ValueError(f"No rows for chosen maturity tj={chosen_tj:.6f}.")
+
+    k_market = d_slice['k'].to_numpy(dtype=float)
+    w_market = d_slice['w'].to_numpy(dtype=float)
+
+    # ensure k range is sane
+    k_min, k_max = float(np.min(k_market)), float(np.max(k_market))
+    if not np.isfinite(k_min) or not np.isfinite(k_max) or k_min == k_max:
+        # widen a tiny bit if degenerate
+        k_min, k_max = k_min - 0.05, k_max + 0.05
+
+    # ----- 5) Smooth model curve
+    k_model = np.linspace(k_min, k_max, 200)
+    w_model = ssvi_sqrt(k_model, chosen_tj, rho_j, eta_j, a, b, c)
+
+    if verbose:
+        print(f"θ(t) = {a:.6f} + {b:.6f} * t^{c:.6f}")
+        print(f"requested tj={tj_req:.6f}  → chosen tj={chosen_tj:.6f}")
+        print(f"slice params: ρ={rho_j:.4f}, η={eta_j:.4f}")
+
+    return {
+        "ticker": ticker_symbol,
+        "requested_tj": tj_req,
+        "chosen_tj": chosen_tj,
+        "a": float(a), "b": float(b), "c": float(c),
+        "rho": float(rho_j), "eta": float(eta_j),
+        "k_market": k_market,
+        "w_market": w_market,
+        "k_model": k_model,
+        "w_model": w_model
+    }
+
+def get_slice_xy_full_for_ticker(ticker_symbol: str,
+                                 tj_value: float,
+                                 type_filter: str = 'all',   # 'all' | 'call' | 'put'
+                                 verbose: int = 0,
+                                 json_safe: bool = True):
+    """
+    Returns data needed to reproduce the original two-panel plot:
+
+      Panel A (Prices vs Strike K):
+        - K_market: strikes (from F * exp(k))
+        - price_market: market BS price (your 'bs_mid')
+        - price_model: SSVI-implied BS price via bs_cost
+
+      Panel B (Total variance w vs log-moneyness k):
+        - k_market: observed k
+        - w_market: observed total variance w
+        - w_model_at_market_k: model w at same ks
+        - k_curve / w_model_curve: smooth curve for drawing a line
+
+    Also returns fitted params and the chosen maturity (closest to request).
+
+    json_safe=True converts arrays to lists and numpy scalars to Python scalars.
+    """
+    # --- Validate tj input
+    if tj_value is None:
+        raise ValueError("tj_value is None. Pass a float time-to-maturity (years).")
+    try:
+        tj_req = float(tj_value)
+    except Exception:
+        raise ValueError(f"tj_value='{tj_value}' is not a float.")
+
+    # --- 1) Pull and combine option data
+    chain = get_option_chain(ticker_symbol)  # {'calls': DataFrame, 'puts': DataFrame}
+    df = pd.concat([chain['calls'], chain['puts']], ignore_index=True)
+
+    # Coerce and clean core columns used below
+    df = df.copy()
+    df['tj'] = pd.to_numeric(df['tj'], errors='coerce')
+    df['k']  = pd.to_numeric(df['k'],  errors='coerce')
+    df['w']  = pd.to_numeric(df['w'],  errors='coerce')
+    df['F']  = pd.to_numeric(df['F'],  errors='coerce')
+    df['bs_mid'] = pd.to_numeric(df['bs_mid'], errors='coerce')
+    df = df.dropna(subset=['tj','k','w','F','bs_mid'])
+    if df.empty:
+        raise ValueError("No valid option rows after cleaning.")
+
+    # Optional filter by type
+    if type_filter in ('call','put'):
+        df = df[df['type'] == type_filter]
+        if df.empty:
+            raise ValueError(f"No rows for option type '{type_filter}' after cleaning.")
+
+    # --- 2) Fit theta(t) = a + b t^c
+    a, b, c = build_theta(df)
+    global THETA_PARAMS
+    THETA_PARAMS = (a, b, c)
+
+    # --- 3) First-guess (rho, eta) globally, then refine for chosen slice
+    (rho_hat, eta_hat), _ = first_guess(df, x0=[-0.5, 1.0], verbose=verbose)
+
+    # Pick closest available maturity to requested tj
+    tjs_available = np.sort(df['tj'].to_numpy(dtype=float))
+    chosen_tj = float(tjs_available[np.argmin(np.abs(tjs_available - tj_req))])
+
+    (rho_j, eta_j), _ = slice_fit(df, chosen_tj, x0=[rho_hat, eta_hat], verbose=verbose)
+
+    # --- 4) Slice rows at chosen_tj (don’t filter by type here to mirror plot_slice)
+    d_slice = df[np.isclose(df['tj'], chosen_tj, atol=1e-12)].copy()
+    if d_slice.empty:
+        raise ValueError(f"No rows for chosen maturity tj={chosen_tj:.6f}.")
+
+    # Panel B (variance): observed and model at market ks
+    ks = d_slice['k'].to_numpy(float)
+    w_market = d_slice['w'].to_numpy(float)
+    w_model_at_market_k = ssvi_sqrt(ks, chosen_tj, rho_j, eta_j, a, b, c)  # like in plot_slice
+    # Smooth curve for a nice line
+    k_min, k_max = float(np.min(ks)), float(np.max(ks))
+    if not np.isfinite(k_min) or not np.isfinite(k_max) or k_min == k_max:
+        k_min, k_max = k_min - 0.05, k_max + 0.05
+    k_curve = np.linspace(k_min, k_max, 200)
+    w_model_curve = ssvi_sqrt(k_curve, chosen_tj, rho_j, eta_j, a, b, c)
+
+    # Panel A (prices): BS market vs model, against strike K
+    Fs = d_slice['F'].to_numpy(float)
+    K_market = Fs * np.exp(ks)
+    price_market = d_slice['bs_mid'].to_numpy(float)  # exactly as in your plot_slice
+    price_model = np.fromiter(
+        (bs_cost(r=R, F=F, k=k, t=chosen_tj, rho=rho_j, eta=eta_j, a=a, b=b, c=c, type_o=ty)
+         for k, F, ty in zip(ks, Fs, d_slice['type'].to_numpy(object))),
+        dtype=float, count=len(d_slice)
+    )
+
+    theta_t = a + b * (chosen_tj ** c)
+
+    out = {
+        "ticker": ticker_symbol,
+        "requested_tj": float(tj_req),
+        "chosen_tj": float(chosen_tj),
+        "theta_t": float(theta_t),
+        "params": {"a": float(a), "b": float(b), "c": float(c), "rho": float(rho_j), "eta": float(eta_j)},
+        "panel_prices": {
+            "K_market": K_market,
+            "price_market": price_market,
+            "price_model": price_model
+        },
+        "panel_variance": {
+            "k_market": ks,
+            "w_market": w_market,
+            "w_model_at_market_k": w_model_at_market_k,
+            "k_curve": k_curve,
+            "w_model_curve": w_model_curve
+        }
+    }
+
+    if not json_safe:
+        return out
+
+    # JSON-safe conversion (arrays → lists, numpy scalars → Python scalars)
+    def J(x):
+        if isinstance(x, np.ndarray): return x.tolist()
+        if isinstance(x, (np.floating, np.integer, np.bool_)): return x.item()
+        if isinstance(x, dict): return {k: J(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)): return [J(v) for v in x]
+        return x
+
+    return J(out)
+
+
+def get_all_slices_df(ticker_symbol: str,
+                      type_o: str = 'call',
+                      verbose: int = 0,
+                      as_json: bool = True,
+                      refresh: bool = False):
+    """
+    Warms cache for (ticker, type_o) and returns the same structure as before.
+    """
+    # Try cache unless refresh requested
+    cached = _get_cached(ticker_symbol, type_o)
+    if (not refresh) and _is_fresh(cached) and ("slices_df" in cached):
+        out = {
+            "ticker": ticker_symbol,
+            "a": float(cached["a"]), "b": float(cached["b"]), "c": float(cached["c"]),
+            "rho": float(cached["rho"]), "eta": float(cached["eta"]),
+            "slices_df": cached["slices_df"]
+        }
+        if not as_json:
+            return out
+        # JSON-safe convert (same as old)
+        def _js(x):
+            if isinstance(x, np.ndarray): return x.tolist()
+            if isinstance(x, (np.floating, np.integer, np.bool_)): return x.item()
+            if isinstance(x, pd.DataFrame): return x.to_dict(orient="records")
+            if isinstance(x, pd.Series): return x.to_list()
+            if isinstance(x, dict): return {k: _js(v) for k, v in x.items()}
+            if isinstance(x, (list, tuple)): return [_js(v) for v in x]
+            return x
+        return _js(out)
+
+    # Build fresh
+    chain = get_option_chain(ticker_symbol)
+    df = pd.concat([chain['calls'], chain['puts']], ignore_index=True)
+
+    a, b, c = build_theta(df)
+    global THETA_PARAMS
+    THETA_PARAMS = (a, b, c)
+
+    (rho_hat, eta_hat), _ = first_guess(df, x0=[-0.5, 1.0], verbose=verbose)
+
+    # compute all slices *and* remember per-slice params
+    tjs = sorted(df['tj'].unique())
+    slice_params = {}
+    rows = []
+    for tj in tjs:
+        (rho_j, eta_j), _ = slice_fit(df, tj, x0=[rho_hat, eta_hat], verbose=verbose)
+        slice_params[float(tj)] = (float(rho_j), float(eta_j))
+        rows.append((float(tj), float(rho_j), float(eta_j)))
+    slices_df_params = pd.DataFrame(rows, columns=['tj','rho','eta']).sort_values('tj').reset_index(drop=True)
+
+    # Then produce the w(k,t) grid (unchanged behavior)
+    slices_df = all_slices(df, rho_hat, eta_hat, a, b, c, type_o=type_o, plot=False, save=False)
+
+    # Warm the cache
+    _set_cached(ticker_symbol, type_o, {
+        "df": df,                 # combined calls+puts with F, k, w, bs_mid, tj
+        "a": float(a), "b": float(b), "c": float(c),
+        "rho": float(rho_hat), "eta": float(eta_hat),
+        "tjs": np.array(tjs, dtype=float),
+        "slice_params": slice_params,   # dict[tj] -> (rho_j, eta_j)
+        "slices_df": slices_df          # ready-to-serve DataFrame for surface
+    })
+
+    out = {
+        "ticker": ticker_symbol,
+        "a": float(a), "b": float(b), "c": float(c),
+        "rho": float(rho_hat), "eta": float(eta_hat),
+        "slices_df": slices_df
+    }
+
+    if not as_json:
+        return out
+
+    def _js(x):
+        if isinstance(x, np.ndarray): return x.tolist()
+        if isinstance(x, (np.floating, np.integer, np.bool_)): return x.item()
+        if isinstance(x, pd.DataFrame): return x.to_dict(orient="records")
+        if isinstance(x, pd.Series): return x.to_list()
+        if isinstance(x, dict): return {k: _js(v) for k, v in x.items()}
+        if isinstance(x, (list, tuple)): return [_js(v) for v in x]
+        return x
+
+    return _js(out)
+
+def get_plot_slice_arrays(ticker_symbol: str, tj_value: float, option_type: str = "call"):
+    """
+    Returns (K, k, bs_mid, bs_est, w_obs, w_est) for the slice nearest to tj_value,
+    now optimized to reuse cache warmed by get_all_slices_df().
+    """
+    if option_type not in ("call", "put"):
+        raise ValueError("option_type must be 'call' or 'put'")
+    try:
+        tj_req = float(tj_value)
+    except Exception:
+        raise ValueError(f"tj_value='{tj_value}' is not a float.")
+
+    cached = _get_cached(ticker_symbol, option_type)
+    if not _is_fresh(cached):
+        # Fallback: warm the cache quickly without JSON conversion
+        get_all_slices_df(ticker_symbol, option_type, as_json=False)
+
+    cached = _get_cached(ticker_symbol, option_type)
+    if not cached:
+        raise RuntimeError("Cache initialization failed.")
+
+    df   = cached["df"]
+    a,b,c = cached["a"], cached["b"], cached["c"]
+
+    # choose nearest tj present in df for this option type
+    df_type = df[df["type"] == option_type].copy()
+    df_type = df_type.dropna(subset=["tj","k","w","F","bs_mid"])
+    if df_type.empty:
+        raise ValueError(f"No {option_type}s available after cleaning.")
+    tjs = np.sort(df_type["tj"].to_numpy(float))
+    chosen_tj = float(tjs[np.argmin(np.abs(tjs - tj_req))])
+
+    # per-slice params: use cache or fit once and store
+    slice_params = cached.get("slice_params", {})
+    if chosen_tj in slice_params:
+        rho_j, eta_j = slice_params[chosen_tj]
+    else:
+        # light one-off refinement for this exact slice
+        global THETA_PARAMS
+        THETA_PARAMS = (a,b,c)
+        (rho_hat, eta_hat) = (cached["rho"], cached["eta"])
+        (rho_j, eta_j), _ = slice_fit(df, chosen_tj, x0=[rho_hat, eta_hat], verbose=0)
+        # update cache in place
+        slice_params[chosen_tj] = (float(rho_j), float(eta_j))
+        _set_cached(ticker_symbol, option_type, {**cached, "slice_params": slice_params})
+
+    # Now extract arrays for this slice & type
+    d = df_type[np.isclose(df_type["tj"], chosen_tj, atol=1e-12)].copy()
+    if d.empty:
+        raise ValueError(f"No rows for chosen maturity tj={chosen_tj:.6f}.")
+
+    ks = d["k"].to_numpy(float)      # k
+    Fs = d["F"].to_numpy(float)
+    K  = Fs * np.exp(ks)             # K
+    w_obs = d["w"].to_numpy(float)   # w_obs
+    w_est = ssvi_sqrt(ks, chosen_tj, rho_j, eta_j, a, b, c)  # w_est
+    bs_mid = d["bs_mid"].to_numpy(float)                     # bs_mid
+    bs_est = np.fromiter(
+        (bs_cost(r=R, F=F, k=k, t=chosen_tj, rho=rho_j, eta=eta_j, a=a, b=b, c=c, type_o=option_type)
+         for k, F in zip(ks, Fs)),
+        dtype=float, count=len(d)
+    )  # bs_est
+
+    return K, ks, bs_mid, bs_est, w_obs, w_est
+
+
 
 if __name__ == "__main__":
     """

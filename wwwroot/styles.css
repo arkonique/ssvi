@@ -1,0 +1,226 @@
+:root{
+    /*--font: 'Cantata One', serif;*/
+    --font1: 'Roboto', sans-serif;
+    --font2: 'Cantata One', serif;
+    --primary-color: #6cdb58;
+}
+
+body {
+    overflow: hidden;
+    font-family: var(--font1);
+    background-color: #fcfcfd;
+    color: #686868;
+    font-weight: light;
+    letter-spacing: 1px;
+    line-height: 30px;
+}
+
+h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font2);
+    font-weight: bold;
+}
+
+h1 {
+    text-align: center;
+    margin: 40px 0;
+}
+
+h2 {
+    color: var(--primary-color);
+    padding: 0 20px;
+}
+
+p {
+    padding: 0 20px;
+    font-size: 1.1em;
+}
+
+/* bullet color and size */
+li::marker {
+    color: var(--primary-color);
+    font-size: 1.2em;
+}
+
+.surface,
+.slices,
+.bottom,
+.prices,
+.vols {
+  min-width: 0;      /* key fix */
+  min-height: 0;     /* helps if inner content has tall intrinsic sizes */
+  overflow: hidden;  /* or overflow:auto if you prefer scrollbars */
+}
+
+/* 2) If you have charts/imgs inside, keep them responsive */
+.surface > * ,
+.slices > * ,
+.prices > * ,
+.vols > * {
+  max-width: 100%;
+  width: 100%;
+  height: 100%;
+}
+
+*, *::before, *::after { box-sizing: border-box; }
+
+.outputs {
+  display: grid;
+  grid-template-areas:
+    "surface slices"
+    "bottom bottom";
+  grid-template-columns: 40% 60%;
+  grid-template-rows: auto auto;
+  gap: 40px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.surface {
+  grid-area: surface;
+  height: 600px;
+}
+
+.surface > * {
+    width: 100%;
+    height: 100%;
+}
+
+.slices {
+  grid-area: slices;
+  height: 600px;
+  width: calc(100% - 40px);
+}
+
+/* nested bottom grid */
+.bottom {
+  grid-area: bottom;
+  display: grid;
+  grid-template-columns: 50% 50%;
+  gap: 10px;
+  width: calc(100% - 50px);
+}
+
+.prices {
+  height: 600px;
+}
+
+.vols {
+  height: 600px;
+}
+
+.tj {
+    grid-column: 1 / span 2;
+}
+
+.tj-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    width: 100%;
+}
+
+#tjMinLabel, #tjMaxLabel, #tjValLabel {
+    width: 60px;
+    text-align: center;
+}
+
+#tjSlider {
+    margin: 0;
+    width: calc(100% - 140px);
+}
+
+#tjValContainer {
+    flex-grow: 1;
+    text-align: center;
+    padding: 30px;
+    font-size: 1.5em;
+    font-weight: bold;
+}
+
+/* make the slider look cool */
+input[type=range] {
+    -webkit-appearance: none; /* Override default CSS styles */
+    appearance: none;
+    width: 100%; /* Full-width */
+    height: 5px; /* Specified height */
+    background: #d3d3d3; /* Grey background */
+    outline: none; /* Remove outline */
+    opacity: 0.7; /* Set transparency (for mouse-over effects on hover) */
+    -webkit-transition: .2s; /* 0.2 seconds transition on hover */
+    transition: opacity .2s;
+    }
+input[type=range]:hover {
+    opacity: 1; /* Fully shown on mouse-over */
+    }
+input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; /* Override default look */
+    appearance: none;
+    width: 15px; /* Specified width */
+    height: 15px; /* Specified height */
+    background: var(--primary-color); /* Green background */
+    border: 2px solid #fff; /* White border */
+    border-radius: 50%; /* Circular thumb */
+    cursor: pointer; /* Pointer cursor on hover */
+    margin-top: -16px; /* You need to specify a margin in Chrome, but in Firefox and IE it is automatic */
+}
+
+input[type=range]::-moz-range-thumb {
+    width: 15px; /* Specified width */
+    height: 15px; /* Specified height */
+    background: var(--primary-color); /* Green background */
+    border: 2px solid #fff; /* White border */
+    border-radius: 50%; /* Circular thumb */
+    cursor: pointer; /* Pointer cursor on hover */
+    margin-top: -16px; /* You need to specify a margin in Chrome, but in Firefox and IE it is automatic */
+}
+
+    /* text input */
+input[type=text] {
+    width: calc(80% - 17px);
+    padding: 12px 20px;
+    margin: 8px 0;
+    margin-left: 20px;
+    box-sizing: border-box;
+    border: 2px solid #ccc;
+    border-radius: 4px;
+    outline: none;
+    font-family: var(--font1);
+}
+
+input[type=text]:focus {
+    border: 2px solid var(--primary-color);
+}
+/* button */
+button {
+    background-color: var(--primary-color);
+    border: none;
+    color: white;
+    padding: 12px 32px;
+    text-align: center;
+    text-decoration: none;
+    display: inline-block;
+    font-size: 16px;
+    margin: 4px 2px;
+    margin-right: 20px;
+    cursor: pointer;
+    border-radius: 4px;
+    width: calc(20% - 30px);
+    font-family: var(--font1);
+}
+
+button:hover {
+    background-color: #57b846;
+}
+
+
+.waiter {
+    width: 99%;
+    height: 50vh;
+    position: absolute;
+    background: #fcfcfd;
+    z-index: 1000;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 4rem;
+}
